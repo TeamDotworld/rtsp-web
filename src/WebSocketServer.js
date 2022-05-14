@@ -1,9 +1,13 @@
 import WorkerManager from "./WorkManager.js";
 import md5 from "js-md5";
+var MediaStreamRecorder = require("msr");
+var Buffer = require("buffer").Buffer;
+
+import { RtpPacket } from "./rtpPacket.js";
 
 var WebsocketServer = function (a, b) {
   function c() {}
-  function d(method, trackId, c, npt) {
+  function createHeader(method, trackId, c, npt) {
     var response = "";
     authorize(storedRealm);
     switch (method) {
@@ -18,6 +22,7 @@ var WebsocketServer = function (a, b) {
           " RTSP/1.0\r\nCSeq: " +
           B +
           (Q ? "\r\nExtraError: support\r\n" : "\r\n") +
+          "Require: www.onvif.org/ver20/backchannel\r\n" +
           authHeader +
           "\r\n";
         break;
@@ -29,6 +34,7 @@ var WebsocketServer = function (a, b) {
           " RTSP/1.0\r\nCSeq: " +
           B +
           (Q ? "\r\nExtraError: support\r\n" : "\r\n") +
+          "Require: www.onvif.org/ver20/backchannel\r\n" +
           authHeader +
           "\r\n";
         break;
@@ -38,11 +44,12 @@ var WebsocketServer = function (a, b) {
             method +
             " " +
             M +
-            "/trackID=video" +
-            //trackId +
+            "/trackID=" +
+            trackId +
             " RTSP/1.0\r\nCSeq: " +
             B +
             (Q ? "\r\nExtraError: support\r\n" : "\r\n") +
+            "Require: www.onvif.org/ver20/backchannel\r\n" +
             authHeader +
             "Transport: RTP/AVP/TCP;unicast;interleaved=" +
             2 * trackId +
@@ -96,6 +103,15 @@ var WebsocketServer = function (a, b) {
   }
   var storedRealm = {};
 
+  function hasUserMedia() {
+    //check if the browser supports the WebRTC
+    return !!(
+      navigator.getUserMedia ||
+      navigator.webkitGetUserMedia ||
+      navigator.mozGetUserMedia
+    );
+  }
+
   function e(a) {
     var b = {},
       e = a.search("CSeq: ") + 5;
@@ -107,9 +123,10 @@ var WebsocketServer = function (a, b) {
       authorize(b);
       storedRealm = b;
 
-      h(d("OPTIONS", null, null));
+      sendDataToWs(createHeader("OPTIONS", null, null));
     } else if (b.ResponseCode === x.OK) {
-      if ("Options" === E) return (E = "Describe"), d("DESCRIBE", null, null);
+      if ("Options" === E)
+        return (E = "Describe"), createHeader("DESCRIBE", null, null);
       if ("Describe" === E) {
         (I = !1),
           (D = n(a)),
@@ -183,7 +200,7 @@ var WebsocketServer = function (a, b) {
                 D.Sessions[g].ControlURL
               );
         }
-        return (F = 0), (E = "Setup"), d("SETUP", F);
+        return (F = 0), (E = "Setup"), createHeader("SETUP", F);
       }
       if ("Setup" === E) {
         if (((G = b.SessionID), F < A.length))
@@ -192,15 +209,17 @@ var WebsocketServer = function (a, b) {
             (A[F].RtcpInterlevedID = b.RtcpInterlevedID),
             (F += 1),
             F !== A.length
-              ? d("SETUP", A[F].trackID.split("=")[1] - 0)
-              : (w.sendSdpInfo(A, L, I), (E = "Play"), d("PLAY", null))
+              ? createHeader("SETUP", A[F].trackID.split("=")[1] - 0)
+              : (w.sendSdpInfo(A, L, I),
+                (E = "Play"),
+                createHeader("PLAY", null))
           );
         console.log("Unknown setup SDP index");
       } else if ("Play" === E) {
         (G = b.SessionID),
           clearInterval(J),
           (J = setInterval(function () {
-            return h(d("GET_PARAMETER", null, null));
+            return sendDataToWs(createHeader("GET_PARAMETER", null, null));
           }, y));
         E = "Playing";
       } else "Playing" === E || console.log("unknown rtsp state:" + E);
@@ -217,8 +236,8 @@ var WebsocketServer = function (a, b) {
             place: "RtspClient.js",
           }),
           F < A.length
-            ? d("SETUP", A[F].trackID)
-            : ((E = "Play"), d("PLAY", null))
+            ? createHeader("SETUP", A[F].trackID)
+            : ((E = "Play"), createHeader("PLAY", null))
         );
       C({
         errorCode: "503",
@@ -240,6 +259,53 @@ var WebsocketServer = function (a, b) {
         void console.log("RTP disconnection detect!!!")
       );
   }
+
+  let rtp = null;
+  if (hasUserMedia()) {
+    navigator.getUserMedia =
+      navigator.getUserMedia ||
+      navigator.webkitGetUserMedia ||
+      navigator.mozGetUserMedia;
+
+    //enabling video and audio channels
+    navigator.getUserMedia(
+      { video: false, audio: true },
+      function (mediaStream) {
+        // get audio from media stream
+        const audio = mediaStream.getAudioTracks()[0];
+
+        var mediaRecorder = new MediaStreamRecorder(mediaStream);
+        mediaRecorder.mimeType = "audio/wav"; // audio/webm or audio/ogg or audio/wav
+        mediaRecorder.ondataavailable = async function (blob) {
+          // console.log(blob);
+          // if (!rtp) {
+          //   rtp = new RtpPacket(blob);
+          // } else {
+          //   rtp.payload = blob;
+          // }
+          // rtp.time += blob.length;
+          // rtp.seq++;
+          // var rtp = new RtpPacket(buffer);
+
+          var buffer = await blob.arrayBuffer();
+
+          const buff = Buffer.from(buffer, "binary");
+          var rtp = new RtpPacket(buff);
+          rtp.payload = buff;
+          rtp.time += buff.length;
+          rtp.seq++;
+
+          console.log(rtp);
+          sendDataToWs(rtp);
+        };
+        mediaRecorder.start(200); // Time limit of 200 milliseconds
+      },
+      function (err) {}
+    );
+  } else {
+    alert("WebRTC is not supported");
+  }
+
   function authorize(a) {
     var b = O.username,
       c = O.passWord,
@@ -273,14 +339,14 @@ var WebsocketServer = function (a, b) {
       (i = md5(g + ":" + e + ":" + h).toLowerCase())
     );
   }
-  function h(a) {
+  function sendDataToWs(a) {
     if (void 0 != a && null != a && "" != a)
-      if (null !== o && o.readyState === WebSocket.OPEN) {
+      if (null !== websocket && websocket.readyState === WebSocket.OPEN) {
         if (v === !1) {
           var b = a.search("DESCRIBE");
           -1 !== b && ((u = !0), (v = !0));
         }
-        void 0 != a && o.send(i(a));
+        void 0 != a && websocket.send(i(a));
       } else console.log("ws未连接");
   }
   function i(a) {
@@ -292,7 +358,7 @@ var WebsocketServer = function (a, b) {
       c[d] = a.charCodeAt(d);
     return c;
   }
-  function j(a) {
+  function processRtpData(a) {
     var b = new Uint8Array(),
       c = new Uint8Array(a.data);
     for (b = new Uint8Array(c.length), b.set(c, 0), s = b.length; s > 0; )
@@ -313,7 +379,7 @@ var WebsocketServer = function (a, b) {
         (q = b.subarray(g, f + RTSP_INTERLEAVE_LENGTH)),
           (b = b.subarray(f + RTSP_INTERLEAVE_LENGTH));
         var i = String.fromCharCode.apply(null, q);
-        h(e(i)), (s = b.length);
+        sendDataToWs(e(i)), (s = b.length);
       } else {
         interleave = b.subarray(0, RTSP_INTERLEAVE_LENGTH);
         t = (interleave[2] << 8) + interleave[3];
@@ -528,7 +594,7 @@ var WebsocketServer = function (a, b) {
     return b;
   }
   var a = a,
-    o = null,
+    websocket = null,
     RTSP_INTERLEAVE_LENGTH = 4,
     q = null,
     interleave = null,
@@ -573,11 +639,11 @@ var WebsocketServer = function (a, b) {
         Q = a;
       },
       connect: function () {
-        o ||
-          ((o = new WebSocket(a)),
-          (o.binaryType = "arraybuffer"),
-          o.addEventListener("message", j, !1),
-          (o.onopen = function () {
+        websocket ||
+          ((websocket = new WebSocket(a)),
+          (websocket.binaryType = "arraybuffer"),
+          websocket.addEventListener("message", processRtpData, !1),
+          (websocket.onopen = function () {
             var a =
                 "OPTIONS " +
                 M +
@@ -586,9 +652,9 @@ var WebsocketServer = function (a, b) {
                 (Q ? "\r\nExtraError: support" : "") +
                 "\r\n\r\n",
               b = i(a);
-            o.send(b);
+            websocket.send(b);
           }),
-          (o.onerror = function () {
+          (websocket.onerror = function () {
             C({
               errorCode: 202,
               description: "Open WebSocket Error",
@@ -596,13 +662,13 @@ var WebsocketServer = function (a, b) {
           }));
       },
       disconnect: function () {
-        h(d("TEARDOWN", null, null)),
+        sendDataToWs(createHeader("TEARDOWN", null, null)),
           clearInterval(J),
           (J = null),
-          null !== o &&
-            o.readyState === WebSocket.OPEN &&
-            (o.close(), (o = null), (G = null)),
-          null !== o && (o.onerror = null),
+          null !== websocket &&
+            websocket.readyState === WebSocket.OPEN &&
+            (websocket.close(), (websocket = null), (G = null)),
+          null !== websocket && (websocket.onerror = null),
           w.terminate();
       },
       controlPlayer: function (a) {
@@ -610,20 +676,21 @@ var WebsocketServer = function (a, b) {
         switch (((P = a.command), a.command)) {
           case "PLAY":
             if (((E = "Play"), null != a.range)) {
-              b = d("PLAY", null, null, a.range);
+              b = createHeader("PLAY", null, null, a.range);
               break;
             }
-            (b = d("PLAY", null, null)), P && w.initStartTime();
+            (b = createHeader("PLAY", null, null)), P && w.initStartTime();
             break;
           case "PAUSE":
             if ("PAUSE" === E) break;
-            (E = "PAUSE"), (b = d("PAUSE", null, null));
+            (E = "PAUSE"), (b = createHeader("PAUSE", null, null));
             break;
           case "SCALE":
-            (b = d("SCALE", null, null, a.data)), w.playbackSpeed(a.data);
+            (b = createHeader("SCALE", null, null, a.data)),
+              w.playbackSpeed(a.data);
             break;
           case "TEARDOWN":
-            b = d("TEARDOWN", null, null);
+            b = createHeader("TEARDOWN", null, null);
             break;
           case "audioPlay":
           case "volumn":
@@ -633,7 +700,7 @@ var WebsocketServer = function (a, b) {
           default:
             console.log("未知指令: " + a.command);
         }
-        "" != b && h(b);
+        "" != b && sendDataToWs(b);
       },
       setLiveMode: function (a) {
         w.setLiveMode("video");
